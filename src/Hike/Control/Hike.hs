@@ -3,6 +3,8 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverlappingInstances #-}
+{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Hike.Control.Hike
 where
 
@@ -12,6 +14,8 @@ import Data.Map
 import qualified Data.Map as Map
 import Data.DList
 import qualified Data.DList as DList
+import Data.Dynamic
+import Data.Typeable
 import Control.Applicative
 import Control.Concurrent.Spawn
 import Control.Lens
@@ -20,13 +24,11 @@ import Control.Monad.RWS
 import Control.Monad.Free
 import Control.Monad.Writer
 -- import Control.Monad.Trans.Either
-import Data.Validation
-import Data.Semigroup
 
 data DState a
     = Same a
     | Diff a
-    deriving (Functor)
+    deriving (Functor, Typeable)
 
 dstate :: (a -> b) -> (a -> b) -> DState a -> b
 dstate same _ (Same a) = same a
@@ -46,13 +48,15 @@ instance Applicative DState where
 
 data HActionF r e a
     = HAsk (r -> a)
-    | HAct (IO (Either e a))
+    | HAct (IO a)
     | HErr e
     deriving (Functor)
 
 data HCondF s a
     = HGet (s -> a)
     | HPut s a
+    | HCache Text Dynamic a
+    | HRead Text (Maybe Dynamic -> a)
     deriving (Functor)
 
 data HikeF r s e a = HA (HActionF r e a) | HC (HCondF s a) deriving (Functor)
@@ -71,7 +75,7 @@ fmapL f = either (Left . f) Right
 
 mapHActionErrorF :: (e -> e') -> HActionF r e (HAction r e' a) -> HAction r e' a
 mapHActionErrorF f (HAsk g)  = Free (HAsk g)
-mapHActionErrorF f (HAct io) = Free (HAct $ fmap (fmapL f) io)
+mapHActionErrorF f (HAct io) = Free (HAct io)
 mapHActionErrorF f (HErr e)  = Free (HErr $ f e)
 
 mapHActionError :: (e -> e') -> HAction r e a -> HAction r e' a
@@ -79,7 +83,7 @@ mapHActionError = iterM . mapHActionErrorF
 
 mapHikeErrorF :: (e -> e') -> HikeF r s e (Hike r s e' a) -> Hike r s e' a
 mapHikeErrorF f (HA (HAsk g))  = Free (HA (HAsk g))
-mapHikeErrorF f (HA (HAct io)) = Free (HA (HAct $ fmap (fmapL f) io))
+mapHikeErrorF f (HA (HAct io)) = Free (HA (HAct io))
 mapHikeErrorF f (HA (HErr e))  = Free (HA (HErr $ f e))
 mapHikeErrorF _ (HC x)         = Free (HC x)
 
@@ -104,6 +108,12 @@ mapHikeReaderF _ (HC x)         = Free (HC x)
 liftHA :: HAction r e a -> Hike r s e a
 liftHA = iterM (Free . HA)
 
+hCache :: Text -> Dynamic -> Hike r s e ()
+hCache k v = liftF (HC (HCache k v ()))
+
+hRead :: Text -> Hike r s e (Maybe Dynamic)
+hRead k = liftF (HC (HRead k id))
+
 instance MonadReader r (HAction r e) where
     ask = liftF (HAsk id)
     local = iterM . mapHActionReaderF
@@ -125,28 +135,30 @@ instance MonadError e (Hike r s e) where
     catchError m                    _ = m
 
 instance MonadIO (HAction r e) where
-    liftIO io = liftF (HAct $ Right <$> io)
+    liftIO io = liftF (HAct io)
 
 instance MonadIO (Hike r s e) where
-    liftIO io = liftF (HA (HAct $ Right <$> io))
+    liftIO io = liftF (HA (HAct io))
 
 instance MonadState s (Hike r s e) where
     get = liftF (HC (HGet id))
     put s = liftF (HC (HPut s ()))
 
-type Run r s e = RWST r (DList Text) s (ErrorT e IO)
+type Run r s e = RWST r (DList Text) (s, Map Text Dynamic) (ErrorT e IO)
 
 runHActionF :: (Error e) => HActionF r e (Run r s e a) -> Run r s e a
 runHActionF (HAsk f)  = ask >>= f
-runHActionF (HAct io) = liftIO io >>= either throwError id
+runHActionF (HAct io) = liftIO io >>= id
 runHActionF (HErr e)  = throwError e
 
 runHAction :: (Error e) => HAction r e a -> Run r s e a
 runHAction = iterM runHActionF
 
 runHCondF :: (Error e) => HCondF s (Run r s e a) -> Run r s e a
-runHCondF (HGet f)   = get >>= f
-runHCondF (HPut s a) = put s >> a
+runHCondF (HGet f)   = gets fst >>= f
+runHCondF (HPut s a) = modify (\(x, y) -> (s, y)) >> a
+runHCondF (HCache k v a) = modify (\(x, y) -> (x, insert k v y)) >> a
+runHCondF (HRead k f) = gets (Map.lookup k . snd) >>= f
 
 runHCond :: (Error e) => HCond s a -> Run r s e a
 runHCond = iterM runHCondF
@@ -172,69 +184,92 @@ printHAction = iterM . printHActionF
 type Condition  r s e a = Hike r s e (DState a)
 type TaskAction r s e a = Hike r s e (DState a)
 
-data Task r s e a = Task (TaskAction r s e a) (Condition r s e a)
+data Task r s e a = Task (TaskAction r s e a) (Condition r s e a) Text
                     deriving (Functor)
 
-data Dependency r s e a
-    = PreCondition (Condition r s e a)
-    | PreTask (Task r s e a)
-    deriving (Functor)
+newtype Cond r s e a = Cond (Condition r s e a) deriving (Functor)
 
-callTask :: Task r s e a -> Condition r s e a
-callTask (Task m post) =
-    post >>= dstate (return . Same) (const m)
+newtype Check r s e a = Check (Condition r s e a) deriving (Functor)
 
-maybeTask :: Dependency r s e a
+taskCondition :: (Typeable a) => Task r s e a -> Condition r s e a
+taskCondition (Task m post k) = cacheCondition cond k
+  where
+    cond = post >>= dstate (return . Same) (const m)
+
+maybeTask :: Condition r s e a
           -> (a -> HAction r e b)
           -> Condition r s e b
           -> Condition r s e b
 maybeTask before m after = do
-    pre  <- condition before
+    pre  <- before
     post <- after
     let both = (,) <$> pre <*> post
     case (,) <$> pre <*> post of
       Same (_, b) -> return (Same b)
       Diff (a, _) -> Diff <$> liftHA (m a)
 
-condition :: Dependency r s e a -> Condition r s e a
-condition (PreCondition x) = x
-condition (PreTask td)     = callTask td
-
 -- instance Applicative (Dependency r s e) where
 --     pure = PreCondition . pure . pure
 --
---     f <*> a = PreCondition (liftA2 (<*>) (condition f) (condition a))
+--     f <*> a = PreCondition (liftA2 (<*>) (depCond f) (condition a))
 
-instance Applicative (Dependency r s e) where
-    pure = PreCondition . pure . pure
+instance Applicative (Cond r s e) where
+    pure = Cond . pure . pure
 
-    f <*> a = PreCondition cond
+    Cond f <*> Cond a = Cond cond
       where
-        cond = case (condition f, condition a) of
+        cond = case (f, a) of
             (Free (HA (HAct iof)), Free (HA (HAct ioa))) ->
-                Free (HA (HAct (join $ liftA5 (<*>) (return iof) (spawn ioa))))
+                Free (HA (HAct (join $ liftA4 (<*>) (return iof) (spawn ioa))))
             (cf, ca) -> liftA2 (<*>) cf ca
-        liftA5 = liftA2 . liftA2 . liftA2 . liftA2
+        liftA4 = liftA2 . liftA2 . liftA2
 
-task :: Dependency r s e a
+task :: (Typeable a, Typeable b)
+     => Cond r s e a
      -> (a -> HAction r e b)
-     -> Condition r s e b
+     -> Check r s e b
+     -> Text
      -> Task r s e b
-task dep m post = Task (maybeTask dep m post) post
+task (Cond dep) m (Check post) k = Task (maybeTask dep m post) post k
+
+cacheCondition :: (Typeable a) => Condition r s e a -> Text -> Condition r s e a
+cacheCondition m k = do
+    mdyn <- hRead k
+    maybe run return (mdyn >>= fromDynamic)
+  where
+    run = do
+        x <- m
+        hCache k (toDyn x)
+        return x
+
+precond :: (Typeable a) => Condition r s e a -> Text -> Cond r s e a
+precond m = Cond . cacheCondition m
+
+pretask :: (Typeable a) => Task r s e a -> Cond r s e a
+pretask = Cond . taskCondition
+
+postcond :: (Typeable a) => Condition r s e a -> Text -> Check r s e a
+postcond m = Check . cacheCondition m
+
+infix 0 ?^
+infix 0 ?$
+a ?^ x = precond a x
+(?$) = postcond
 
 
 data BasicConfig = BasicConfig
     { _sourceFiles :: [String]
     }
 
-compiler :: Dependency BasicConfig s Text String
-compiler = PreCondition $ return (Same "cc")
+compiler :: Cond BasicConfig s Text String
+compiler = return (Same "cc") ?^ "compiler"
 
-sources :: Dependency BasicConfig s Text [String]
-sources = PreCondition $ asks _sourceFiles >>= return . Diff
+sources :: Cond BasicConfig s Text [String]
+sources = (asks _sourceFiles >>= return . Diff) ?^ "sources"
 
-objects :: Condition BasicConfig s Text [String]
-objects = asks _sourceFiles >>= return . Same . fmap (++ ".o")
+objects :: Check BasicConfig s Text [String]
+objects =
+    asks _sourceFiles >>= return . Same . fmap (++ ".o") ?$ "objects"
 
 buildAction :: (String, [String]) -> HAction r Text [String]
 buildAction (cc, files) = do
@@ -242,7 +277,7 @@ buildAction (cc, files) = do
     return $ (++ ".o") <$> files
 
 build :: Task BasicConfig s Text [String]
-build = task ((,) <$> compiler <*> sources) buildAction objects
+build = task ((,) <$> compiler <*> sources) buildAction objects (pack "build")
 
 -- h1 :: HAction Int String Int
 -- h1 = hErr "asdf"

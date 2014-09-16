@@ -22,11 +22,9 @@ library
   -- other-extensions:    
   build-depends:       base >=4.7 && <4.8,
                        lens >=4.4.0.0 && <4.5,
-                       validation >=0.4.0 && <0.5,
-                       semigroups >=0.15.0 && <0.16,
                        mtl >= 2.1.0 && <2.3,
                        free >= 4.9 && <5,
-                       either >= 4.3.1 && <4.4,
+                       either >= 4.3.0 && <4.4,
                        exceptions >=0.6.1 && <0.7,
                        text >=1.1.0.0 &&<1.2,
                        containers >=0.5.5.0 &&<0.5.6,
