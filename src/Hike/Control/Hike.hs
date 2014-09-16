@@ -10,6 +10,8 @@ import Data.Functor
 import Data.Text
 import Data.Map
 import qualified Data.Map as Map
+import Data.DList
+import qualified Data.DList as DList
 import Control.Applicative
 import Control.Concurrent.Spawn
 import Control.Lens
@@ -132,7 +134,7 @@ instance MonadState s (Hike r s e) where
     get = liftF (HC (HGet id))
     put s = liftF (HC (HPut s ()))
 
-type Run r s e = RWST r [String] s (ErrorT e IO)
+type Run r s e = RWST r (DList Text) s (ErrorT e IO)
 
 runHActionF :: (Error e) => HActionF r e (Run r s e a) -> Run r s e a
 runHActionF (HAsk f)  = ask >>= f
