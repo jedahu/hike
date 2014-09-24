@@ -8,14 +8,12 @@ module Hike.Control.HikeT
 where
 
 import Data.Functor
-import Data.Text
-import qualified Data.Text as Text
+import Data.Text as Text
 import Data.Map
 import qualified Data.Map as Map
 import Data.DList
 import qualified Data.DList as DList
 import Data.Dynamic
-import Data.Typeable
 import Control.Applicative
 import Control.Concurrent.Spawn
 import Control.Lens hiding (liftAct)
@@ -72,7 +70,8 @@ data Task r s e m a =
     Task (FreeT (CacheF m) (RunM r s e m) (DState a)) (Check r s e m a) Text
     deriving (Functor)
 
-instance (Error e, Applicative m, Monad m) => Applicative (Condition r s e m) where
+instance (Error e, Applicative m, Monad m)
+         => Applicative (Condition r s e m) where
     pure = Condition . pure . pure
 
     (Condition f) <*> (Condition a) = Condition (liftA2 (<*>) f a)
@@ -87,11 +86,7 @@ plift2 f a b = return f `papply` a `papply` b
       => Condition r s e IO (a -> b)
       -> Condition r s e IO a
       -> Condition r s e IO b
-(Condition f) *|* (Condition a) = undefined -- Condition apply
---   where
---     apply :: (Error e) => FreeT (CacheF IO) (RunM r s e IO) (DState b)
---     apply = case (runFreeT f, runFreeT a) of
---         (Pure f, Pure a)
+(*|*) = undefined
 
 cacheWrite :: (Error e, Functor m, Monad m, Monad n)
            => Text -> Dynamic -> FreeT (CacheF m) (RunM r s e n) ()
@@ -143,7 +138,6 @@ actRequire :: (Error e, Functor m, Monad m)
 actRequire before m after = do
     pre  <- before
     post <- after
-    let both = (,) <$> pre <*> post
     case (,) <$> pre <*> post of
       Same (_, b) -> return (Same b)
       Diff (a, _) -> Diff <$> idToM' (liftAct (m a))
@@ -193,13 +187,13 @@ record fa = record' (idToM' fa >> return ())
     go (Pure a) = do
         tell (DList.singleton ("done", pack (show a)))
         return a
-    go (Free (CacheWrite k v a)) = do
+    go (Free (CacheWrite k _ a)) = do
         tell (DList.singleton ("write", k))
         record' a
     go (Free (CacheRead k f)) = do
         tell (DList.singleton ("read", k))
         record' (f Nothing)
-    go (Free (CacheAct m)) = do
+    go (Free (CacheAct _)) = do
         tell (DList.singleton ("act", ""))
         record' (return ())
 
