@@ -11,7 +11,6 @@ import Data.Monoid
 import Text.Show
 
 import Control.Applicative
-import Control.Monad
 
 
 data ResultState
@@ -36,10 +35,6 @@ resultState f (Result s a) = fmap (\s' -> Result s' a) (f s)
 
 resultValue :: (Functor f) => (a -> f b) -> Result a -> f (Result b)
 resultValue f (Result s a) = fmap (Result s) (f a)
-
-resultFold :: (a -> b) -> (a -> b) -> Result a -> b
-resultFold f _ (Result Same a) = f a
-resultFold _ g (Result Diff a) = g a
 
 instance Applicative Result where
     pure = Result Same
