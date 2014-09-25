@@ -29,12 +29,19 @@ data Result a
     = Result ResultState a
     deriving (Show, Eq, Functor, Typeable)
 
-resultState
-    :: (Functor f) => (ResultState -> f ResultState) -> Result a -> f (Result a)
-resultState f (Result s a) = fmap (\s' -> Result s' a) (f s)
+same :: a -> Result a
+same = Result Same
 
-resultValue :: (Functor f) => (a -> f b) -> Result a -> f (Result b)
-resultValue f (Result s a) = fmap (Result s) (f a)
+diff :: a -> Result a
+diff = Result Diff
+
+state
+    :: (Functor f)
+    => (ResultState -> f ResultState) -> Result a -> f (Result a)
+state f (Result s a) = fmap (\s' -> Result s' a) (f s)
+
+value :: (Functor f) => (a -> f b) -> Result a -> f (Result b)
+value f (Result s a) = fmap (Result s) (f a)
 
 instance Applicative Result where
     pure = Result Same

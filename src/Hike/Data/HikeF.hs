@@ -1,7 +1,16 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE TypeSynonymInstances #-}
+{-# LANGUAGE FlexibleInstances #-}
 module Hike.Data.HikeF
 ( HikeF(..)
+, Cached()
+, cached
+, Fun()
+, fun
+, call
+, maybeCall
+, (*|*)
 )
 where
 
@@ -11,8 +20,15 @@ import Data.Functor
 import Data.Maybe
 import Data.Ord
 
+import Control.Applicative
+import Control.Concurrent.Spawn hiding (Result)
+import Control.Lens
 import Control.Monad.Free
 import Control.Monad.State
+
+import System.IO
+
+import Hike.Data.Result
 
 
 data HikeF m k a
@@ -43,5 +59,44 @@ cache m k = do
         return a
 
 newtype Cached m k a
-    = Cached (Free (HikeF m k) a)
+    = Cached (Free (HikeF m k) (Result a))
     deriving (Functor)
+
+instance (Functor m) => Applicative (Cached m k) where
+    pure = Cached . pure . pure
+
+    (<*>) (Cached f) (Cached a) = Cached (liftA2 (<*>) f a)
+
+(*|*) (Cached u) (Cached v) = Cached (go u v)
+  where
+    go (Pure f) (Pure a) = return (f <*> a)
+    go (Free (HikeLift f)) (Free (HikeLift a)) =
+        join $ hikeLift $ join
+        $ (liftA2 . liftA2 . liftA2) (<*>) (return f) (spawn a)
+    go f@(Free (HikeLift _)) a = go f (a >>= hikeLift . return)
+    go f a@(Free (HikeLift _)) = go (f >>= hikeLift . return) a
+    go f a = liftA2 (<*>) f a
+
+cached
+    :: (Typeable a, Ord k, Functor m)
+    => Free (HikeF m k) (Result a) -> k -> Cached m k a
+cached m k = Cached (cache m k)
+
+newtype Fun m a b = Fun (a -> m b)
+
+fun :: (a -> m b) -> Fun m a b
+fun = Fun
+
+call :: (Functor m) => Fun m a b -> Cached m k a -> Cached m k b
+call (Fun f) (Cached a) = Cached (a >>= hikeLift . fmap diff . f . (^.value))
+
+maybeCall
+    :: (Functor m)
+    => Fun m a b -> Cached m k a -> Cached m k b -> Cached m k b
+maybeCall (Fun f) a b = Cached $ do
+    Result s (a', b') <- ab
+    case s of
+      Same -> return (same b')
+      Diff -> (hikeLift . fmap diff . f) a'
+  where
+    (Cached ab) = (,) <$> a <*> b
