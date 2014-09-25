@@ -4,13 +4,14 @@
 {-# LANGUAGE FlexibleInstances #-}
 module Hike.Data.HikeF
 ( HikeF(..)
-, Cached()
+, Cached
 , cached
-, Fun()
-, fun
 , call
 , maybeCall
 , (*|*)
+, Task
+, task
+, runTask
 )
 where
 
@@ -67,6 +68,7 @@ instance (Functor m) => Applicative (Cached m k) where
 
     (<*>) (Cached f) (Cached a) = Cached (liftA2 (<*>) f a)
 
+(*|*) :: Cached IO k (a -> b) -> Cached IO k a -> Cached IO k b
 (*|*) (Cached u) (Cached v) = Cached (go u v)
   where
     go (Pure f) (Pure a) = return (f <*> a)
@@ -82,21 +84,30 @@ cached
     => Free (HikeF m k) (Result a) -> k -> Cached m k a
 cached m k = Cached (cache m k)
 
-newtype Fun m a b = Fun (a -> m b)
-
-fun :: (a -> m b) -> Fun m a b
-fun = Fun
-
-call :: (Functor m) => Fun m a b -> Cached m k a -> Cached m k b
-call (Fun f) (Cached a) = Cached (a >>= hikeLift . fmap diff . f . (^.value))
+call :: (Functor m) => (a -> m b) -> Cached m k a -> Cached m k b
+call f (Cached a) = Cached (a >>= hikeLift . fmap diff . f . (^.value))
 
 maybeCall
     :: (Functor m)
-    => Fun m a b -> Cached m k a -> Cached m k b -> Cached m k b
-maybeCall (Fun f) a b = Cached $ do
+    => (a -> m b) -> Cached m k a -> Cached m k b -> Cached m k b
+maybeCall f a b = Cached $ do
     Result s (a', b') <- ab
     case s of
       Same -> return (same b')
       Diff -> (hikeLift . fmap diff . f) a'
   where
     (Cached ab) = (,) <$> a <*> b
+
+data Task m k a b
+    = Task k (Cached m k a) (a -> m b) (Free (HikeF m k) (Result b))
+
+task
+    :: k
+    -> (Cached m k a)
+    -> (a -> m b)
+    -> (Free (HikeF m k) (Result b))
+    -> Task m k a b
+task = Task
+
+runTask :: (Ord k, Typeable b, Functor m) => Task m k a b -> Cached m k b
+runTask (Task k a f b) = maybeCall f a (cached b k)
