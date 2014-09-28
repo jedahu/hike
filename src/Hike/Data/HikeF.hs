@@ -3,7 +3,8 @@
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE FlexibleInstances #-}
 module Hike.Data.HikeF
-( HikeF(..)
+( Key
+, HikeF(..)
 , Cached
 , cached
 , call
@@ -11,7 +12,7 @@ module Hike.Data.HikeF
 , (*|*)
 , Task
 , task
-, runTask
+, cachedTask
 )
 where
 
@@ -19,7 +20,6 @@ import Data.Dynamic
 import Data.Function
 import Data.Functor
 import Data.Maybe
-import Data.Ord
 
 import Control.Applicative
 import Control.Concurrent.Spawn hiding (Result)
@@ -30,26 +30,29 @@ import Control.Monad.State
 import System.IO
 
 import Hike.Data.Result
+import Hike.Control.Monad.Unique
 
 
-data HikeF m k a
-    = HikeCache k Dynamic a
-    | HikeRead k (Maybe Dynamic -> a)
+type Key = UID
+
+data HikeF m a
+    = HikeCache Key Dynamic a
+    | HikeRead Key (Maybe Dynamic -> a)
     | HikeLift (m a)
     deriving (Functor)
 
-hikeCache :: (Ord k, Functor m) => k -> Dynamic -> Free (HikeF m k) ()
+hikeCache :: (Functor m) => Key -> Dynamic -> Free (HikeF m) ()
 hikeCache k v = liftF (HikeCache k v ())
 
-hikeRead :: (Ord k, Functor m) => k -> Free (HikeF m k) (Maybe Dynamic)
+hikeRead :: (Functor m) => Key -> Free (HikeF m) (Maybe Dynamic)
 hikeRead k = liftF (HikeRead k id)
 
-hikeLift :: (Functor m) => m a -> Free (HikeF m k) a
+hikeLift :: (Functor m) => m a -> Free (HikeF m) a
 hikeLift m = liftF (HikeLift m)
 
 cache
-    :: (Ord k, Typeable a, Functor m)
-    => Free (HikeF m k) a -> k -> Free (HikeF m k) a
+    :: (Typeable a, Functor m)
+    => Free (HikeF m) a -> Key -> Free (HikeF m) a
 cache m k = do
     d <- hikeRead k
     maybe go return (d >>= fromDynamic)
@@ -59,16 +62,16 @@ cache m k = do
         hikeCache k (toDyn a)
         return a
 
-newtype Cached m k a
-    = Cached (Free (HikeF m k) (Result a))
+newtype Cached m a
+    = Cached (Free (HikeF m) (Result a))
     deriving (Functor)
 
-instance (Functor m) => Applicative (Cached m k) where
+instance (Functor m) => Applicative (Cached m) where
     pure = Cached . pure . pure
 
     (<*>) (Cached f) (Cached a) = Cached (liftA2 (<*>) f a)
 
-(*|*) :: Cached IO k (a -> b) -> Cached IO k a -> Cached IO k b
+(*|*) :: Cached IO (a -> b) -> Cached IO a -> Cached IO b
 (*|*) (Cached u) (Cached v) = Cached (go u v)
   where
     go (Pure f) (Pure a) = return (f <*> a)
@@ -79,17 +82,22 @@ instance (Functor m) => Applicative (Cached m k) where
     go f a@(Free (HikeLift _)) = go (f >>= hikeLift . return) a
     go f a = liftA2 (<*>) f a
 
-cached
-    :: (Typeable a, Ord k, Functor m)
-    => Free (HikeF m k) (Result a) -> k -> Cached m k a
-cached m k = Cached (cache m k)
+mkCached
+    :: (Typeable a, Functor m)
+    => Free (HikeF m) (Result a) -> Key -> Cached m a
+mkCached m = Cached . cache m
 
-call :: (Functor m) => (a -> m b) -> Cached m k a -> Cached m k b
+cached
+    :: (Typeable a, Functor m)
+    => Free (HikeF m) (Result a) -> Unique (Cached m a)
+cached m = mkCached m <$> fresh
+
+call :: (Functor m) => (a -> m b) -> Cached m a -> Cached m b
 call f (Cached a) = Cached (a >>= hikeLift . fmap diff . f . (^.value))
 
 maybeCall
     :: (Functor m)
-    => (a -> m b) -> Cached m k a -> Cached m k b -> Cached m k b
+    => (a -> m b) -> Cached m a -> Cached m b -> Cached m b
 maybeCall f a b = Cached $ do
     Result s (a', b') <- ab
     case s of
@@ -98,16 +106,15 @@ maybeCall f a b = Cached $ do
   where
     (Cached ab) = (,) <$> a <*> b
 
-data Task m k a b
-    = Task k (Cached m k a) (a -> m b) (Free (HikeF m k) (Result b))
+data Task m a b
+    = Task (Cached m a) (a -> m b) (Free (HikeF m) (Result b))
 
 task
-    :: k
-    -> (Cached m k a)
+    :: (Cached m a)
     -> (a -> m b)
-    -> (Free (HikeF m k) (Result b))
-    -> Task m k a b
+    -> (Free (HikeF m) (Result b))
+    -> Task m a b
 task = Task
 
-runTask :: (Ord k, Typeable b, Functor m) => Task m k a b -> Cached m k b
-runTask (Task k a f b) = maybeCall f a (cached b k)
+cachedTask :: (Typeable b, Functor m) => Task m a b -> Unique (Cached m b)
+cachedTask (Task a f b) = maybeCall f a <$> cached b

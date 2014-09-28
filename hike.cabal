@@ -19,9 +19,13 @@ cabal-version:       >=1.10
 library
   exposed-modules:     Hike.Control.Hike,
                        Hike.Control.HikeT,
+                       Hike.Control.Monad.Cache,
+                       Hike.Control.Monad.Memo,
+                       Hike.Control.Monad.Unique,
                        Hike.Data.Result,
                        Hike.Data.HikeF,
-                       Hike.Data.HikeF.Run
+                       Hike.Data.HikeF.Run,
+                       Hike.Condition.File
   -- other-modules:       
   -- other-extensions:    
   build-depends:       base >=4.7 && <4.8,

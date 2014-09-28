@@ -16,7 +16,7 @@ import qualified Data.DList as DList
 import Data.Dynamic
 import Control.Applicative
 import Control.Concurrent.Spawn
-import Control.Lens hiding (liftAct)
+import Control.Lens hiding (liftAct, pre)
 import Control.Monad.Error
 import Control.Monad.RWS
 import Control.Monad.Trans.Free
